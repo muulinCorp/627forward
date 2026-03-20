@@ -1,0 +1,19 @@
+- dest:
+    host: "tcp://localhost"
+    port: "1883"
+    username: ""
+    password: ""
+    data_topic: "v1/rawdata"
+    cmd_topic: "cmd/12345"
+    qos: 0
+  source:
+    host: "tcp://localhost"
+    port: "1883"
+    username: ""
+    password: ""
+    data_topic: "v2/rawdata"
+    cmd_topic: "cmd2/12345"
+    qos: 0
+  devices:
+    - id: "HKMC852"
+      mac: "F4:70:0C:73:C2:66"

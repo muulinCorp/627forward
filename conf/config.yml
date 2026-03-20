@@ -1,0 +1,4 @@
+log:
+    fluentd:
+      host: fluentd
+      port: 24224
