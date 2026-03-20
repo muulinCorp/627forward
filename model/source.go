@@ -103,42 +103,43 @@ func NewBridge(ctx context.Context, rule BridgeRule, index int) (Bridge, error) 
 	//      topic 格式：dest.cmd_topic/<md5(mac+gwID)>
 	//      收到後直接轉發到 source 的對應動態 cmd topic
 	destCmdTopics := rule.DeviceCmdTopics(rule.Dest.CmdTopic)
-	if len(destCmdTopics) == 0 {
-		return nil, errors.New("no devices defined, cannot build cmd topics")
-	}
+	var destSubServLocal mqtt.MqttSubOnlyServer
+	if len(destCmdTopics) > 0 {
+		destCmdTransMap := make(map[string]trans.Trans, len(destCmdTopics))
+		for _, cmdTopic := range destCmdTopics {
+			cmdTopic := cmdTopic // capture for closure
+			destCmdTransMap[cmdTopic] = trans.NewSimpleTrans(func(topic string, payload []byte) error {
+				if !isAllowedPayload(payload, rule) {
+					return nil
+				}
+				// topic 格式為 dest.cmd_topic/<md5hex>，
+				// 直接取出 suffix 接到 source.cmd_topic 即可，不需重新計算
+				suffix := topic[len(rule.Dest.CmdTopic):]
+				srcCmdTopic := rule.Source.CmdTopic + suffix
+				return srcCmdPub.PublishToTopic(srcCmdTopic, payload)
+			})
+		}
 
-	destCmdTransMap := make(map[string]trans.Trans, len(destCmdTopics))
-	for _, cmdTopic := range destCmdTopics {
-		cmdTopic := cmdTopic // capture for closure
-		destCmdTransMap[cmdTopic] = trans.NewSimpleTrans(func(topic string, payload []byte) error {
-			if !isAllowedPayload(payload, rule) {
-				return nil
-			}
-			// topic 格式為 dest.cmd_topic/<md5hex>，
-			// 直接取出 suffix 接到 source.cmd_topic 即可，不需重新計算
-			suffix := topic[len(rule.Dest.CmdTopic):]
-			srcCmdTopic := rule.Source.CmdTopic + suffix
-			return srcCmdPub.PublishToTopic(srcCmdTopic, payload)
-		})
-	}
-
-	destSubCfg, err := makeMqttCfg(rule.Dest, destCmdTopics, "dest-sub-cmd-"+idxStr)
-	if err != nil {
-		return nil, err
-	}
-	destSubServ, err := mqtt.NewMqttSubOnlyServ(destSubCfg, destCmdTransMap)
-	if err != nil {
-		return nil, errors.Wrap(err, "create dest cmd subscriber fail")
+		destSubCfg, err := makeMqttCfg(rule.Dest, destCmdTopics, "dest-sub-cmd-"+idxStr)
+		if err != nil {
+			return nil, err
+		}
+		destSubServLocal, err = mqtt.NewMqttSubOnlyServ(destSubCfg, destCmdTransMap)
+		if err != nil {
+			return nil, errors.Wrap(err, "create dest cmd subscriber fail")
+		}
 	}
 
 	return &bridgeImpl{
 		sourceSubServ: sourceSubServ,
-		destSubServ:   destSubServ,
+		destSubServ:   destSubServLocal,
 	}, nil
 }
 
 func (b *bridgeImpl) Run(ctx context.Context) {
-	go b.destSubServ.Run(ctx)
+	if b.destSubServ != nil {
+		go b.destSubServ.Run(ctx)
+	}
 	b.sourceSubServ.Run(ctx)
 }
 
@@ -146,24 +147,36 @@ func (b *bridgeImpl) Run(ctx context.Context) {
 // 並檢查是否在允許清單內。
 // 若 payload 不含相關欄位或解析失敗，則放行（不過濾）。
 func isAllowedPayload(payload []byte, rule BridgeRule) bool {
-	// 若裝置清單為空，全部放行
+	// 若裝置清單為空，沒有任何 device 要轉發 -> 不放行
 	if len(rule.MacSet) == 0 {
-		return true
+		return false
 	}
 
 	var data map[string]interface{}
+	// 若不是可解析的 JSON，視為無法識別裝置 -> 不放行
 	if err := json.Unmarshal(payload, &data); err != nil {
-		// 非 JSON 格式，無法過濾，放行
-		return true
+		return false
 	}
 
-	// 檢查 MAC
-	if mac, ok := data["MAC_Address"]; ok {
-		macStr, _ := mac.(string)
-		_, allowed := rule.MacSet[macStr]
-		return allowed
+	// 必須包含 MAC_Address 與 GW_ID 欄位，且兩者要同時匹配到規則
+	macVal, ok := data["MAC_Address"]
+	if !ok {
+		return false
+	}
+	gwVal, ok := data["GW_ID"]
+	if !ok {
+		return false
+	}
+	macStr, _ := macVal.(string)
+	gwStr, _ := gwVal.(string)
+	if macStr == "" || gwStr == "" {
+		return false
 	}
 
-	// 沒有 MAC 欄位，放行
-	return true
+	// 檢查 mac 是否存在，且對應的 device id (GW_ID) 必須相同
+	expectedGwID, exists := rule.MacSet[macStr]
+	if !exists {
+		return false
+	}
+	return expectedGwID == gwStr
 }
