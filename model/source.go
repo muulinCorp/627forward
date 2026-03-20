@@ -99,22 +99,34 @@ func NewBridge(ctx context.Context, rule BridgeRule, index int) (Bridge, error) 
 		return nil, errors.Wrap(err, "create source subscriber fail")
 	}
 
-	// ── 4. dest subscriber（訂閱 dest cmd_topic）
-	//      過濾裝置後，raw payload → srcCmdPub
-	destCmdTrans := trans.NewSimpleTrans(func(topic string, payload []byte) error {
-		if !isAllowedPayload(payload, rule) {
-			return nil
-		}
-		return srcCmdPub.Publish(payload)
-	})
+	// ── 4. dest subscriber（訂閱每個 device 對應的動態 cmd topic）
+	//      topic 格式：dest.cmd_topic/<md5(mac+gwID)>
+	//      收到後直接轉發到 source 的對應動態 cmd topic
+	destCmdTopics := rule.DeviceCmdTopics(rule.Dest.CmdTopic)
+	if len(destCmdTopics) == 0 {
+		return nil, errors.New("no devices defined, cannot build cmd topics")
+	}
 
-	destSubCfg, err := makeMqttCfg(rule.Dest, []string{rule.Dest.CmdTopic}, "dest-sub-cmd-"+idxStr)
+	destCmdTransMap := make(map[string]trans.Trans, len(destCmdTopics))
+	for _, cmdTopic := range destCmdTopics {
+		cmdTopic := cmdTopic // capture for closure
+		destCmdTransMap[cmdTopic] = trans.NewSimpleTrans(func(topic string, payload []byte) error {
+			if !isAllowedPayload(payload, rule) {
+				return nil
+			}
+			// topic 格式為 dest.cmd_topic/<md5hex>，
+			// 直接取出 suffix 接到 source.cmd_topic 即可，不需重新計算
+			suffix := topic[len(rule.Dest.CmdTopic):]
+			srcCmdTopic := rule.Source.CmdTopic + suffix
+			return srcCmdPub.PublishToTopic(srcCmdTopic, payload)
+		})
+	}
+
+	destSubCfg, err := makeMqttCfg(rule.Dest, destCmdTopics, "dest-sub-cmd-"+idxStr)
 	if err != nil {
 		return nil, err
 	}
-	destSubServ, err := mqtt.NewMqttSubOnlyServ(destSubCfg, map[string]trans.Trans{
-		rule.Dest.CmdTopic: destCmdTrans,
-	})
+	destSubServ, err := mqtt.NewMqttSubOnlyServ(destSubCfg, destCmdTransMap)
 	if err != nil {
 		return nil, errors.Wrap(err, "create dest cmd subscriber fail")
 	}

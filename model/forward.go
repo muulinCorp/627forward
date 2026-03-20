@@ -1,6 +1,8 @@
 package model
 
 import (
+	"crypto/md5"
+	"fmt"
 	"os"
 
 	"github.com/muulinCorp/interlib/util"
@@ -34,17 +36,30 @@ type gwDevice struct {
 
 // BridgeRule 是解析後、可直接使用的單一橋接規則
 type BridgeRule struct {
-	Dest     MqttEndpoint
-	Source   MqttEndpoint
-	// macSet: mac -> device id，用於快速過濾
-	MacSet   map[string]string
+	Dest   MqttEndpoint
+	Source MqttEndpoint
+	// MacSet: mac -> device id，用於 isAllowedPayload 過濾
+	MacSet map[string]string
+	// Md5TopicSet: md5hex -> mac，用於 dest cmd 動態訂閱與反查
+	// key = md5(mac+id)，value = mac
+	Md5TopicSet map[string]string
 }
 
-// IsAllowed 檢查 payload 中的 MAC 是否在允許清單內，
-// 同時回傳對應的 device id
-func (r *BridgeRule) IsAllowed(mac string) (string, bool) {
-	id, ok := r.MacSet[mac]
-	return id, ok
+// DeviceCmdTopics 回傳此規則下所有 device 對應的 dest cmd 動態 topic 列表，
+// 格式為 "<baseCmdTopic>/<md5hex>"
+func (r *BridgeRule) DeviceCmdTopics(baseCmdTopic string) []string {
+	topics := make([]string, 0, len(r.Md5TopicSet))
+	for md5hex := range r.Md5TopicSet {
+		topics = append(topics, fmt.Sprintf("%s/%s", baseCmdTopic, md5hex))
+	}
+	return topics
+}
+
+// CalcMd5Topic 計算單一 mac+gwID 組合的動態 topic
+func CalcMd5Topic(baseCmdTopic, mac, gwID string) string {
+	raw := fmt.Sprintf("%s%s", mac, gwID)
+	hash := md5.Sum([]byte(raw))
+	return fmt.Sprintf("%s/%x", baseCmdTopic, hash)
 }
 
 // LoadBridgeRules 從 yaml 設定檔讀取並回傳所有橋接規則
@@ -65,13 +80,19 @@ func LoadBridgeRules(cfgPath string) ([]BridgeRule, error) {
 	rules := make([]BridgeRule, 0, len(confs))
 	for _, conf := range confs {
 		macSet := make(map[string]string, len(conf.Devices))
+		md5TopicSet := make(map[string]string, len(conf.Devices))
 		for _, d := range conf.Devices {
 			macSet[d.Mac] = d.Id
+			raw := fmt.Sprintf("%s%s", d.Mac, d.Id)
+			hash := md5.Sum([]byte(raw))
+			md5hex := fmt.Sprintf("%x", hash)
+			md5TopicSet[md5hex] = d.Mac
 		}
 		rules = append(rules, BridgeRule{
-			Dest:   conf.Dest,
-			Source: conf.Source,
-			MacSet: macSet,
+			Dest:        conf.Dest,
+			Source:      conf.Source,
+			MacSet:      macSet,
+			Md5TopicSet: md5TopicSet,
 		})
 	}
 	return rules, nil

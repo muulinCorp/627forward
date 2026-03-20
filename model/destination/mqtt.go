@@ -11,6 +11,8 @@ import (
 // RawPublisher 將原始 bytes 直接發布到固定 topic，不做任何轉換
 type RawPublisher interface {
 	Publish(payload []byte) error
+	// PublishToTopic 允許指定動態 topic（base topic 將被忽略）
+	PublishToTopic(topic string, payload []byte) error
 }
 
 type rawPublisherImpl struct {
@@ -38,7 +40,11 @@ func NewRawPublisher(ctx context.Context, cfg *mqttCfg.Config) (RawPublisher, er
 }
 
 func (p *rawPublisherImpl) Publish(payload []byte) error {
-	err := p.mqttServ.Publish(p.topic, p.qos, payload)
+	return p.PublishToTopic(p.topic, payload)
+}
+
+func (p *rawPublisherImpl) PublishToTopic(topic string, payload []byte) error {
+	err := p.mqttServ.Publish(topic, p.qos, payload)
 	if err != nil {
 		return errors.Wrap(err, "mqtt publish fail")
 	}
